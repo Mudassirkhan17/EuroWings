@@ -122,7 +122,6 @@ Match or slightly undercut **{m['cheapest_carrier']}** (€{m['cheapest_price_eu
 
 ## Risk
 Undercutting too far on a €{m['price_spread_eur']:.2f} spread erodes margin without gaining share if {m['cheapest_carrier']} matches."""
-}
 
 
 def _call_openai(api_key: str, messages: list[dict]) -> str:
