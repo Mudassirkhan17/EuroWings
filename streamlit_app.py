@@ -1,12 +1,13 @@
 """
 Eurowings Case Study — Competitor price predictor (Streamlit demo).
-Enter trip details once → predicted price for all competitor carriers.
+Enter trip details once → predicted price for all competitor carriers + BA chat.
 """
 
 from pathlib import Path
 
 import streamlit as st
 
+from llm_insights import build_context, get_chat_reply, get_initial_insights
 from model_utils import (
     load_artifacts,
     load_competitor_data,
@@ -27,7 +28,6 @@ DATA_PATH = ROOT / "skyscanner_airfare_data.csv"
 
 @st.cache_resource
 def load_models():
-    """Use pre-exported joblib locally, or train once from CSV on Streamlit Cloud."""
     if (MODELS_DIR / "log_rf.joblib").exists():
         return load_artifacts(MODELS_DIR)
 
@@ -55,11 +55,81 @@ def load_models():
     )
 
 
+def _forecast_key(user_input: dict) -> str:
+    return "|".join(f"{k}={user_input[k]}" for k in sorted(user_input))
+
+
+def run_forecast(user_input, carriers, log_rf, residual_rf, trend_map):
+    results = predict_all_carriers(
+        user_input, carriers, log_rf, residual_rf, trend_map
+    )
+    context = build_context(user_input, results)
+    insights, source, chat_history = get_initial_insights(context)
+    return results, context, insights, source, chat_history
+
+
+def render_results():
+    results = st.session_state["forecast_results"]
+    insights = st.session_state["forecast_insights"]
+    source = st.session_state["forecast_source"]
+    cheapest = results.iloc[0]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Cheapest carrier", cheapest["Carrier"])
+    m2.metric("Ensemble price (€)", f"{cheapest['Ensemble_Price_EUR']:.2f}")
+    m3.metric("Carriers compared", len(results))
+
+    st.subheader("Pricing analyst")
+    st.markdown(insights)
+    if source == "llm":
+        st.caption("AI analyst · uses forecast numbers only · not live fares")
+    else:
+        st.caption("Rule-based verdict · add OPENAI_API_KEY in .env for full chat")
+
+    st.markdown("**Discuss this forecast** — ask questions or share your pricing idea:")
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input(
+        "e.g. We want €175 Business — is that viable? What if we match W6 only on weekends?"
+    ):
+        st.session_state["chat_history"].append({"role": "user", "content": prompt})
+        reply, _ = get_chat_reply(
+            st.session_state["forecast_context"],
+            st.session_state["chat_history"][:-1],
+            prompt,
+        )
+        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+        st.rerun()
+
+    st.divider()
+    st.subheader("All competitor prices (sorted cheapest first)")
+    st.dataframe(
+        results.style.format(
+            {
+                "Ensemble_Price_EUR": "€ {:.2f}",
+                "LogRF_Price_EUR": "€ {:.2f}",
+                "HoltResidual_Price_EUR": "€ {:.2f}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+    chart_df = results.set_index("Carrier")[["Ensemble_Price_EUR"]]
+    st.subheader("Price comparison")
+    st.bar_chart(chart_df)
+
+    st.caption(
+        "Model estimates from Skyscanner training data. "
+        "Ensemble: 31.3% Log RF + 68.7% Holt+Residual."
+    )
+
+
 def main():
     st.title("✈️ Competitor Airfare Price Forecast")
     st.caption(
-        "Case Study 1 demo — ensemble model (31.3% Log RF + 68.7% Holt+Residual). "
-        "Enter search details once to compare all competitor carriers."
+        "Predict competitor prices, get a short BA verdict, then chat through your pricing idea."
     )
 
     with st.spinner("Loading models (first visit may take ~1–2 min)..."):
@@ -98,7 +168,9 @@ def main():
         number_of_nights = st.number_input(
             "Number of nights (0 for one-way)", min_value=0, max_value=30, value=7
         )
-        is_connecting = st.selectbox("Connecting flight?", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes")
+        is_connecting = st.selectbox(
+            "Connecting flight?", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes"
+        )
 
     origin_country = origin_map.get(origin, "DE")
     dest_country = dest_map.get(destination, "ES")
@@ -108,53 +180,37 @@ def main():
         f"**Week:** `2024-W{week_number:02d}`"
     )
 
-    if st.button("Predict all competitor prices", type="primary"):
-        user_input = {
-            "week_number": week_number,
-            "origin_airport": origin,
-            "destination_airport": destination,
-            "origin_country": origin_country,
-            "destination_country": dest_country,
-            "cabin_class": cabin,
-            "trip_type": trip_type,
-            "user_country": user_country,
-            "booking_horizon": float(booking_horizon),
-            "number_of_nights": float(number_of_nights),
-            "is_connecting": int(is_connecting),
-        }
+    user_input = {
+        "week_number": week_number,
+        "origin_airport": origin,
+        "destination_airport": destination,
+        "origin_country": origin_country,
+        "destination_country": dest_country,
+        "cabin_class": cabin,
+        "trip_type": trip_type,
+        "user_country": user_country,
+        "booking_horizon": float(booking_horizon),
+        "number_of_nights": float(number_of_nights),
+        "is_connecting": int(is_connecting),
+    }
 
-        with st.spinner("Predicting prices for all carriers..."):
-            results = predict_all_carriers(
+    if st.button("Predict all competitor prices", type="primary"):
+        with st.spinner("Running forecast and analyst review..."):
+            results, context, insights, source, chat_history = run_forecast(
                 user_input, carriers, log_rf, residual_rf, trend_map
             )
+        st.session_state["forecast_key"] = _forecast_key(user_input)
+        st.session_state["forecast_results"] = results
+        st.session_state["forecast_context"] = context
+        st.session_state["forecast_insights"] = insights
+        st.session_state["forecast_source"] = source
+        st.session_state["chat_history"] = chat_history
 
-        cheapest = results.iloc[0]
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Cheapest carrier", cheapest["Carrier"])
-        m2.metric("Ensemble price (€)", f"{cheapest['Ensemble_Price_EUR']:.2f}")
-        m3.metric("Carriers compared", len(results))
-
-        st.subheader("All competitor prices (sorted cheapest first)")
-        st.dataframe(
-            results.style.format(
-                {
-                    "Ensemble_Price_EUR": "€ {:.2f}",
-                    "LogRF_Price_EUR": "€ {:.2f}",
-                    "HoltResidual_Price_EUR": "€ {:.2f}",
-                }
-            ),
-            use_container_width=True,
-        )
-
-        chart_df = results.set_index("Carrier")[["Ensemble_Price_EUR"]]
-        st.subheader("Price comparison")
-        st.bar_chart(chart_df)
-
-        st.info(
-            "Prices are model estimates from Skyscanner training data, not live fares. "
-            "Ensemble combines Log RF and Holt+Residual RF (weights tuned in pred3.ipynb)."
-        )
+    if st.session_state.get("forecast_results") is not None:
+        current_key = _forecast_key(user_input)
+        if st.session_state.get("forecast_key") != current_key:
+            st.warning("Search inputs changed — click **Predict** again to refresh numbers and chat.")
+        render_results()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ Streamlit demo (competitor price forecast)
 
 Run locally:
   pip install -r requirements.txt
+  # optional: OPENAI_API_KEY in .env for AI insights after Predict
   streamlit run streamlit_app.py
 
 Deploy on Streamlit Cloud (free):
@@ -21,3 +22,4 @@ Deploy on Streamlit Cloud (free):
   - Repo: Mudassirkhan17/EuroWings
   - Main file: streamlit_app.py
   - Python 3.10+
+  - Add secret OPENAI_API_KEY in app Settings → Secrets (for AI summary)
