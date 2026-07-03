@@ -7,7 +7,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from llm_insights import build_context, get_chat_reply, get_initial_insights
+from llm_insights import (
+    build_context,
+    format_market_snapshot,
+    get_chat_reply,
+    get_initial_insights,
+)
 from model_utils import (
     load_artifacts,
     load_competitor_data,
@@ -64,13 +69,14 @@ def run_forecast(user_input, carriers, log_rf, residual_rf, trend_map):
         user_input, carriers, log_rf, residual_rf, trend_map
     )
     context = build_context(user_input, results)
-    insights, source, chat_history = get_initial_insights(context)
-    return results, context, insights, source, chat_history
+    recommendation, source = get_initial_insights(context)
+    return results, context, recommendation, source
 
 
 def render_results():
     results = st.session_state["forecast_results"]
-    insights = st.session_state["forecast_insights"]
+    context = st.session_state["forecast_context"]
+    recommendation = st.session_state["forecast_recommendation"]
     source = st.session_state["forecast_source"]
     cheapest = results.iloc[0]
 
@@ -79,31 +85,16 @@ def render_results():
     m2.metric("Ensemble price (€)", f"{cheapest['Ensemble_Price_EUR']:.2f}")
     m3.metric("Carriers compared", len(results))
 
-    st.subheader("Pricing analyst")
-    st.markdown(insights)
+    st.subheader("Market snapshot")
+    st.markdown(format_market_snapshot(context))
+
+    st.subheader("Analyst recommendation")
+    st.markdown(recommendation)
     if source == "llm":
-        st.caption("AI analyst · uses forecast numbers only · not live fares")
+        st.caption("AI analyst · numbers from model forecast · not live fares")
     else:
-        st.caption("Rule-based verdict · add OPENAI_API_KEY in .env for full chat")
+        st.caption("Rule-based recommendation · add OPENAI_API_KEY for AI chat")
 
-    st.markdown("**Discuss this forecast** — ask questions or share your pricing idea:")
-    for msg in st.session_state["chat_history"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if prompt := st.chat_input(
-        "e.g. We want €175 Business — is that viable? What if we match W6 only on weekends?"
-    ):
-        st.session_state["chat_history"].append({"role": "user", "content": prompt})
-        reply, _ = get_chat_reply(
-            st.session_state["forecast_context"],
-            st.session_state["chat_history"][:-1],
-            prompt,
-        )
-        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
-        st.rerun()
-
-    st.divider()
     st.subheader("All competitor prices (sorted cheapest first)")
     st.dataframe(
         results.style.format(
@@ -122,14 +113,34 @@ def render_results():
 
     st.caption(
         "Model estimates from Skyscanner training data. "
-        "Ensemble: 31.3% Log RF + 68.7% Holt+Residual."
+        "Ensemble: 31.3% Log RF + 68.7% Holt+Residual. "
+        "Key price drivers: cabin, week/season, carrier, booking horizon."
     )
+
+    st.divider()
+    st.subheader("Ask the analyst")
+    st.caption("Share your pricing idea or ask a follow-up — e.g. “We want €175 — is that OK?”")
+
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Your question or pricing idea…"):
+        st.session_state["chat_history"].append({"role": "user", "content": prompt})
+        reply, _ = get_chat_reply(
+            context,
+            recommendation,
+            st.session_state["chat_history"][:-1],
+            prompt,
+        )
+        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+        st.rerun()
 
 
 def main():
     st.title("✈️ Competitor Airfare Price Forecast")
     st.caption(
-        "Predict competitor prices, get a short BA verdict, then chat through your pricing idea."
+        "Predict competitor prices, see market range, get a short recommendation, then chat."
     )
 
     with st.spinner("Loading models (first visit may take ~1–2 min)..."):
@@ -195,21 +206,21 @@ def main():
     }
 
     if st.button("Predict all competitor prices", type="primary"):
-        with st.spinner("Running forecast and analyst review..."):
-            results, context, insights, source, chat_history = run_forecast(
+        with st.spinner("Running forecast..."):
+            results, context, recommendation, source = run_forecast(
                 user_input, carriers, log_rf, residual_rf, trend_map
             )
         st.session_state["forecast_key"] = _forecast_key(user_input)
         st.session_state["forecast_results"] = results
         st.session_state["forecast_context"] = context
-        st.session_state["forecast_insights"] = insights
+        st.session_state["forecast_recommendation"] = recommendation
         st.session_state["forecast_source"] = source
-        st.session_state["chat_history"] = chat_history
+        st.session_state["chat_history"] = []
 
     if st.session_state.get("forecast_results") is not None:
         current_key = _forecast_key(user_input)
         if st.session_state.get("forecast_key") != current_key:
-            st.warning("Search inputs changed — click **Predict** again to refresh numbers and chat.")
+            st.warning("Search inputs changed — click **Predict** again to refresh.")
         render_results()
 
 
